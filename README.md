@@ -67,8 +67,3 @@ The project is implemented in a Jupyter Notebook, which includes the following s
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-
-- The cardiovascular disease dataset used in this project is sourced from [source].
-- Special thanks to the creators of DEAP for the genetic algorithm implementation.
-
