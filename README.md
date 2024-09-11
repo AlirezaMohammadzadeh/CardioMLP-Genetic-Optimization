@@ -1,7 +1,3 @@
-Got it! Here’s an updated README.md reflecting that the project is implemented in a Jupyter Notebook:
-
----
-
 # MLP with Genetic Algorithm-Based Hyperparameter Tuning for Cardiovascular Disease Prediction
 
 ## Overview
@@ -76,6 +72,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - The cardiovascular disease dataset used in this project is sourced from [source].
 - Special thanks to the creators of DEAP for the genetic algorithm implementation.
 
----
-
-Feel free to modify this further if needed!
