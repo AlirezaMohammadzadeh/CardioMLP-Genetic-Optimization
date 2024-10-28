@@ -37,32 +37,6 @@ The project is implemented in a Jupyter Notebook, which includes the following s
 4. **MLP Model Training**: Configuration and training of the MLP model with optimized hyperparameters.
 5. **Evaluation**: Performance evaluation and results generation.
 
-## Usage
-
-1. **Clone the Repository**:
-   ```bash
-   git clone <repository-url>
-   cd <repository-directory>
-   ```
-
-2. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Open the Jupyter Notebook**:
-   ```bash
-   jupyter notebook <notebook-file>.ipynb
-   ```
-
-4. **Run the Cells**: Follow the notebook cells to preprocess the data, tune hyperparameters, train the MLP model, and evaluate its performance.
-
-## Requirements
-
-- Python 3.x
-- Jupyter Notebook
-- Dependencies listed in `requirements.txt`
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
