@@ -141,6 +141,7 @@ def evaluate(individual):
     X_val_selected = X_val.iloc[:, feature_mask]
     
     if X_train_selected.shape[1] == 0:  # If no features selected
+        print("\nSkipping evaluation - No features selected")
         return 0.0,
 
     # Convert to PyTorch tensors and move to GPU
@@ -160,6 +161,12 @@ def evaluate(individual):
         activation = ['identity', 'logistic', 'tanh', 'relu'][individual[-2]]
         alpha = individual[-1]  # L2 regularization parameter
         
+        print("\nTraining MLP with configuration:")
+        print(f"Hidden layers: {hidden_layers}")
+        print(f"Activation: {activation}")
+        print(f"Alpha: {alpha:.6f}")
+        print(f"Number of features: {X_train_selected.shape[1]}")
+        
         # Create and move model to GPU
         model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
         criterion = nn.BCELoss()
@@ -168,12 +175,17 @@ def evaluate(individual):
         # Training loop
         model.train()
         for epoch in range(100):  # Reduced epochs for faster evaluation
+            total_loss = 0.0
             for batch_X, batch_y in train_loader:
                 optimizer.zero_grad()
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y.unsqueeze(1))
                 loss.backward()
                 optimizer.step()
+                total_loss += loss.item()
+            
+            if epoch % 20 == 0:  # Print every 20 epochs
+                print(f"Epoch {epoch}: Loss = {total_loss/len(train_loader):.4f}")
         
         # Evaluation
         model.eval()
@@ -181,10 +193,11 @@ def evaluate(individual):
             val_outputs = model(X_val_tensor)
             val_preds = (val_outputs > 0.5).float().squeeze()
             accuracy = (val_preds == y_val_tensor).float().mean().item()
+            print(f"Validation Accuracy: {accuracy:.4f}")
         
         return accuracy,
     except Exception as e:
-        print(f"Error in evaluation: {e}")
+        print(f"\nError in evaluation: {e}")
         return 0.0,
 
 # Define the genetic algorithm components
@@ -211,6 +224,20 @@ toolbox.register("mutate", custom_mutate, indpb=0.2)
 toolbox.register("select", tools.selTournament, tournsize=3)
 toolbox.register("evaluate", evaluate)
 
+def log_stats(gen, population, fits):
+    """Log statistics for each generation"""
+    fit_mins = min(fits)
+    fit_maxs = max(fits)
+    fit_means = sum(fits) / len(population)
+    fit_std = np.std(fits)
+    
+    print(f"Gen {gen}: ")
+    print(f"  Min: {fit_mins:.4f}")
+    print(f"  Max: {fit_maxs:.4f}")
+    print(f"  Avg: {fit_means:.4f}")
+    print(f"  Std: {fit_std:.4f}")
+    print("------------------------")
+
 def main():
     random.seed(42)
     torch.manual_seed(42)
@@ -220,8 +247,34 @@ def main():
     # Initialize population
     population = toolbox.population(n=30)
     
-    # Apply the genetic algorithm
-    algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=50, verbose=True)
+    # Statistics setup
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+    stats.register("avg", np.mean)
+    stats.register("std", np.std)
+
+    # Configure logging
+    logbook = tools.Logbook()
+    logbook.header = "gen", "min", "max", "avg", "std"
+
+    # Apply the genetic algorithm with logging
+    for gen in range(50):  # 50 generations
+        # Select the next generation individuals
+        offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.2)
+        
+        # Evaluate the individuals with an invalid fitness
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit
+        
+        # Replace population with offspring
+        population[:] = offspring
+        
+        # Gather and print statistics
+        fits = [ind.fitness.values[0] for ind in population]
+        log_stats(gen, population, fits)
     
     # Get the best individual
     best_individual = tools.selBest(population, k=1)[0]
@@ -280,16 +333,16 @@ def main():
         precision = precision_score(y_test_cpu, test_preds_cpu)
         recall = recall_score(y_test_cpu, test_preds_cpu)
         f1 = f1_score(y_test_cpu, test_preds_cpu)
-        auc = roc_auc_score(y_test_cpu, test_probs_cpu)
-        brier = brier_score_loss(y_test_cpu, test_probs_cpu)
+        #auc = roc_auc_score(y_test_cpu, test_probs_cpu)
+        #brier = brier_score_loss(y_test_cpu, test_probs_cpu)
     
     print("\nModel Performance Metrics:")
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
     print(f"Recall: {recall:.4f}")
     print(f"F1-Score: {f1:.4f}")
-    print(f"AUC: {auc:.4f}")
-    print(f"Brier Score: {brier:.4f}")
+    #print(f"AUC: {auc:.4f}")
+    #print(f"Brier Score: {brier:.4f}")
     
     # Print selected features
     selected_features = X_train.columns[feature_mask].tolist()
