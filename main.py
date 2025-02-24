@@ -140,32 +140,19 @@ def evaluate(individual):
     X_train_selected = X_train.iloc[:, feature_mask]
     X_val_selected = X_val.iloc[:, feature_mask]
     
-    if X_train_selected.shape[1] == 0:  # If no features selected
-        print("\nSkipping evaluation - No features selected")
+    if X_train_selected.shape[1] == 0:
         return 0.0,
 
     # Convert to PyTorch tensors and move to GPU
     X_train_tensor = torch.tensor(X_train_selected.values, dtype=torch.float32).to(device)
-    X_val_tensor = torch.tensor(X_val_selected.values, dtype=torch.float32).to(device)
     y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
-    y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).to(device)
-
-    # Create data loaders
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     
     try:
         # Configure model
         num_hidden_layers = int(individual[-3])
         hidden_layers = tuple(hyperparameters[:num_hidden_layers])
         activation = ['identity', 'logistic', 'tanh', 'relu'][individual[-2]]
-        alpha = individual[-1]  # L2 regularization parameter
-        
-        print("\nTraining MLP with configuration:")
-        print(f"Hidden layers: {hidden_layers}")
-        print(f"Activation: {activation}")
-        print(f"Alpha: {alpha:.6f}")
-        print(f"Number of features: {X_train_selected.shape[1]}")
+        alpha = individual[-1]
         
         # Create and move model to GPU
         model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
@@ -174,30 +161,34 @@ def evaluate(individual):
         
         # Training loop
         model.train()
-        for epoch in range(100):  # Reduced epochs for faster evaluation
+        train_losses = []
+        train_accuracies = []
+        
+        for epoch in range(100):
             total_loss = 0.0
-            for batch_X, batch_y in train_loader:
-                optimizer.zero_grad()
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y.unsqueeze(1))
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
+            correct = 0
+            total = 0
             
-            if epoch % 20 == 0:  # Print every 20 epochs
-                print(f"Epoch {epoch}: Loss = {total_loss/len(train_loader):.4f}")
+            outputs = model(X_train_tensor)
+            loss = criterion(outputs, y_train_tensor.unsqueeze(1))
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # Calculate training accuracy
+            predictions = (outputs > 0.5).float().squeeze()
+            correct += (predictions == y_train_tensor).sum().item()
+            total += y_train_tensor.size(0)
+            
+            train_acc = correct / total
+            train_losses.append(loss.item())
+            train_accuracies.append(train_acc)
+            
+        return train_accuracies[-1],
         
-        # Evaluation
-        model.eval()
-        with torch.no_grad():
-            val_outputs = model(X_val_tensor)
-            val_preds = (val_outputs > 0.5).float().squeeze()
-            accuracy = (val_preds == y_val_tensor).float().mean().item()
-            print(f"Validation Accuracy: {accuracy:.4f}")
-        
-        return accuracy,
     except Exception as e:
-        print(f"\nError in evaluation: {e}")
+        print(f"Error in evaluation: {e}")
         return 0.0,
 
 # Define the genetic algorithm components
@@ -237,6 +228,66 @@ def log_stats(gen, population, fits):
     print(f"  Avg: {fit_means:.4f}")
     print(f"  Std: {fit_std:.4f}")
     print("------------------------")
+
+def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, criterion, optimizer, num_epochs=1000):
+    train_losses = []
+    train_accuracies = []
+    val_losses = []
+    val_accuracies = []
+    
+    for epoch in range(num_epochs):
+        # Training
+        model.train()
+        optimizer.zero_grad()
+        train_outputs = model(X_train_tensor)
+        train_loss = criterion(train_outputs, y_train_tensor.unsqueeze(1))
+        train_loss.backward()
+        optimizer.step()
+        
+        # Calculate training metrics
+        train_preds = (train_outputs > 0.5).float().squeeze()
+        train_acc = (train_preds == y_train_tensor).float().mean().item()
+        train_losses.append(train_loss.item())
+        train_accuracies.append(train_acc)
+        
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val_tensor)
+            val_loss = criterion(val_outputs, y_val_tensor.unsqueeze(1))
+            val_preds = (val_outputs > 0.5).float().squeeze()
+            val_acc = (val_preds == y_val_tensor).float().mean().item()
+            val_losses.append(val_loss.item())
+            val_accuracies.append(val_acc)
+        
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+    
+    return train_losses, train_accuracies, val_losses, val_accuracies
+
+def plot_training_metrics(train_losses, train_accuracies, val_losses, val_accuracies):
+    plt.figure(figsize=(12, 4))
+    
+    # Plot losses
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    # Plot accuracies
+    plt.subplot(1, 2, 2)
+    plt.plot(train_accuracies, label='Train Accuracy')
+    plt.plot(val_accuracies, label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
 
 def main():
     random.seed(42)
@@ -306,15 +357,15 @@ def main():
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     
-    # Train final model
-    best_model.train()
-    for epoch in range(1000):  # More epochs for final model
-        for batch_X, batch_y in train_loader:
-            optimizer.zero_grad()
-            outputs = best_model(batch_X)
-            loss = criterion(outputs, batch_y.unsqueeze(1))
-            loss.backward()
-            optimizer.step()
+    # Train best model with validation
+    train_losses, train_accuracies, val_losses, val_accuracies = train_best_model(
+        best_model, X_train_tensor, y_train_tensor, 
+        X_val_tensor, y_val_tensor,
+        criterion, optimizer
+    )
+
+    # Plot training metrics
+    plot_training_metrics(train_losses, train_accuracies, val_losses, val_accuracies)
     
     # Evaluate final model
     best_model.eval()
