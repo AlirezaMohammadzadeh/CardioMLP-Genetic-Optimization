@@ -310,7 +310,7 @@ def main():
     logbook.header = "gen", "min", "max", "avg", "std"
 
     # Apply the genetic algorithm with logging
-    for gen in range(50):  # 50 generations
+    for gen in range(1):  # 50 generations
         # Select the next generation individuals
         offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.2)
         
@@ -355,12 +355,12 @@ def main():
     
     # Create data loader for training
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
     
     # Train best model with validation
     train_losses, train_accuracies, val_losses, val_accuracies = train_best_model(
         best_model, X_train_tensor, y_train_tensor, 
-        X_val_tensor, y_val_tensor,
+        X_train_tensor, y_train_tensor,
         criterion, optimizer
     )
 
