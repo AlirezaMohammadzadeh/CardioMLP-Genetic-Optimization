@@ -11,3 +11,6 @@ pygad==2.22.1
 flask==3.0.2
 requests==2.31.0
 python-dotenv==1.0.1
+
+
+Selected Features: ['gender', 'weight', 'ap_hi', 'cholesterol', 'smoke', 'active', 'blood_pressure']
