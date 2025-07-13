@@ -5,22 +5,15 @@ from sklearn.utils import shuffle
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.feature_selection import SelectKBest, f_classif, RFE
+from sklearn.ensemble import RandomForestClassifier
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from deap import base, creator, tools, algorithms
 import random
-import numpy as np
-import pandas as pd
-from sklearn.neural_network import MLPClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score
-import pygad
 import torch
-
 
 file_path = 'dataset/cardio_train.csv'
 
@@ -46,7 +39,6 @@ df.loc[(df['ap_hi'] > 140) | (df['ap_lo'] > 90), 'blood_pressure'] = 3
 
 df['bmi'] = df['weight'] / (df['height'] / 100) ** 2
 
-
 df.fillna(df.median(), inplace=True)
 df = df.drop(columns=['id'],axis=1)
 
@@ -56,7 +48,6 @@ y = df['cardio']
 
 columns_to_standardize = ['age', 'height','weight','ap_hi','ap_lo','bmi']
 
-
 # Split dataset into training and testing sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=42)
@@ -64,9 +55,19 @@ X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.
 # Standardize the feature values
 scaler = StandardScaler()
 X_train[columns_to_standardize] = scaler.fit_transform(X_train[columns_to_standardize])
-X_test[columns_to_standardize] = scaler.fit_transform(X_test[columns_to_standardize])
-X_val[columns_to_standardize] = scaler.fit_transform(X_val[columns_to_standardize])
+X_test[columns_to_standardize] = scaler.transform(X_test[columns_to_standardize])
+X_val[columns_to_standardize] = scaler.transform(X_val[columns_to_standardize])
 
+# Feature Selection using SelectKBest
+print("Performing feature selection...")
+selector = SelectKBest(score_func=f_classif, k=8)  # Select top 8 features
+X_train_selected = selector.fit_transform(X_train, y_train)
+X_val_selected = selector.transform(X_val)
+X_test_selected = selector.transform(X_test)
+
+# Get selected feature names
+selected_features = X_train.columns[selector.get_support()].tolist()
+print(f"Selected features: {selected_features}")
 
 # Check CUDA availability
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,30 +76,24 @@ print(f"Using device: {device}")
 if not torch.cuda.is_available():
     print("WARNING: CUDA is not available. Running on CPU instead.")
 
-
-# Create the Fitness and Individual classes
+# Create the Fitness and Individual classes for hyperparameter optimization only
 creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMax)
 
 def custom_mutate(individual, indpb):
-    # Mutate the feature mask (binary values)
-    for i in range(num_features):
-        if random.random() < indpb:
-            individual[i] = 1 - individual[i]  # Flip the binary feature mask
-    
     # Mutate the hidden layer sizes and number of layers
-    for i in range(num_features, num_features + 10):
+    for i in range(5):  # Reduced from 10 to 5 possible hidden layers
         if random.random() < indpb:
-            individual[i] = random.randint(10, 200)
+            individual[i] = random.randint(10, 100)  # Reduced max size from 200 to 100
     
     if random.random() < indpb:
-        individual[num_features + 10] = random.randint(1, 10)
+        individual[5] = random.randint(1, 3)  # Reduced max layers from 10 to 3
     
     if random.random() < indpb:
-        individual[num_features + 11] = random.randint(0, 3)
+        individual[6] = random.randint(0, 3)
 
     if random.random() < indpb:
-        individual[num_features + 12] = random.uniform(0.0001, 0.01)
+        individual[7] = random.uniform(0.0001, 0.01)
 
     return individual,
 
@@ -132,43 +127,28 @@ class MLPModel(nn.Module):
         return self.model(x)
 
 def evaluate(individual):
-    feature_mask = individual[:num_features]
-    hyperparameters = individual[num_features:]
+    hyperparameters = individual
     
-    # Convert feature mask to boolean array
-    feature_mask = np.array(feature_mask, dtype=bool)
-    X_train_selected = X_train.iloc[:, feature_mask]
-    X_val_selected = X_val.iloc[:, feature_mask]
-    
-    if X_train_selected.shape[1] == 0:
-        return 0.0,
-
     # Convert to PyTorch tensors and move to GPU
-    X_train_tensor = torch.tensor(X_train_selected.values, dtype=torch.float32).to(device)
+    X_train_tensor = torch.tensor(X_train_selected, dtype=torch.float32).to(device)
     y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
     
     try:
         # Configure model
-        num_hidden_layers = int(individual[-3])
+        num_hidden_layers = int(individual[5])
         hidden_layers = tuple(hyperparameters[:num_hidden_layers])
-        activation = ['identity', 'logistic', 'tanh', 'relu'][individual[-2]]
-        alpha = individual[-1]
+        activation = ['identity', 'logistic', 'tanh', 'relu'][individual[6]]
+        alpha = individual[7]
         
         # Create and move model to GPU
         model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
         criterion = nn.BCELoss()
         optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=alpha)
         
-        # Training loop
+        # Training loop - reduced epochs from 100 to 20
         model.train()
-        train_losses = []
-        train_accuracies = []
         
-        for epoch in range(100):
-            total_loss = 0.0
-            correct = 0
-            total = 0
-            
+        for epoch in range(20):
             outputs = model(X_train_tensor)
             loss = criterion(outputs, y_train_tensor.unsqueeze(1))
             
@@ -176,16 +156,13 @@ def evaluate(individual):
             loss.backward()
             optimizer.step()
             
-            # Calculate training accuracy
+        # Calculate final training accuracy
+        with torch.no_grad():
+            outputs = model(X_train_tensor)
             predictions = (outputs > 0.5).float().squeeze()
-            correct += (predictions == y_train_tensor).sum().item()
-            total += y_train_tensor.size(0)
+            accuracy = (predictions == y_train_tensor).float().mean().item()
             
-            train_acc = correct / total
-            train_losses.append(loss.item())
-            train_accuracies.append(train_acc)
-            
-        return train_accuracies[-1],
+        return accuracy,
         
     except Exception as e:
         print(f"Error in evaluation: {e}")
@@ -194,19 +171,16 @@ def evaluate(individual):
 # Define the genetic algorithm components
 toolbox = base.Toolbox()
 
-# Define individual components
-num_features = X_train.shape[1]
-toolbox.register("attr_feature", random.randint, 0, 1)
-toolbox.register("attr_hidden_layer_size", random.randint, 10, 200)
-toolbox.register("attr_num_hidden_layers", random.randint, 1, 10)
+# Define individual components - only hyperparameters now
+toolbox.register("attr_hidden_layer_size", random.randint, 10, 100)
+toolbox.register("attr_num_hidden_layers", random.randint, 1, 3)
 toolbox.register("attr_activation", random.randint, 0, 3)
 toolbox.register("attr_alpha", random.uniform, 0.0001, 0.01)
 
-# Create feature mask attributes
-feature_attrs = [toolbox.attr_feature for _ in range(num_features)]
-hidden_layer_attrs = [toolbox.attr_hidden_layer_size for _ in range(10)]
+# Create hyperparameter attributes
+hidden_layer_attrs = [toolbox.attr_hidden_layer_size for _ in range(5)]
 other_attrs = [toolbox.attr_num_hidden_layers, toolbox.attr_activation, toolbox.attr_alpha]
-all_attrs = feature_attrs + hidden_layer_attrs + other_attrs
+all_attrs = hidden_layer_attrs + other_attrs
 
 toolbox.register("individual", tools.initCycle, creator.Individual, all_attrs, n=1)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
@@ -229,7 +203,7 @@ def log_stats(gen, population, fits):
     print(f"  Std: {fit_std:.4f}")
     print("------------------------")
 
-def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, criterion, optimizer, num_epochs=1000):
+def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, criterion, optimizer, num_epochs=50):  # Reduced from 1000 to 50
     train_losses = []
     train_accuracies = []
     val_losses = []
@@ -260,7 +234,7 @@ def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_
             val_losses.append(val_loss.item())
             val_accuracies.append(val_acc)
         
-        if epoch % 100 == 0:
+        if epoch % 10 == 0:  # Reduced logging frequency
             print(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
     
     return train_losses, train_accuracies, val_losses, val_accuracies
@@ -295,8 +269,8 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
     
-    # Initialize population
-    population = toolbox.population(n=30)
+    # Initialize population - reduced from 10 to 5
+    population = toolbox.population(n=5)
     
     # Statistics setup
     stats = tools.Statistics(lambda ind: ind.fitness.values)
@@ -309,8 +283,8 @@ def main():
     logbook = tools.Logbook()
     logbook.header = "gen", "min", "max", "avg", "std"
 
-    # Apply the genetic algorithm with logging
-    for gen in range(1):  # 50 generations
+    # Apply the genetic algorithm with logging - reduced to 3 generations
+    for gen in range(3):
         # Select the next generation individuals
         offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.2)
         
@@ -331,36 +305,35 @@ def main():
     best_individual = tools.selBest(population, k=1)[0]
     print("\nBest individual is:", best_individual)
     
-    # Get feature mask and evaluate final model
-    feature_mask = np.array(best_individual[:num_features], dtype=bool)
-    X_train_selected = X_train.iloc[:, feature_mask]
-    X_test_selected = X_test.iloc[:, feature_mask]
-    
     # Convert to CUDA tensors
-    X_train_tensor = torch.tensor(X_train_selected.values, dtype=torch.float32).to(device)
-    X_test_tensor = torch.tensor(X_test_selected.values, dtype=torch.float32).to(device)
+    X_train_tensor = torch.tensor(X_train_selected, dtype=torch.float32).to(device)
+    X_test_tensor = torch.tensor(X_test_selected, dtype=torch.float32).to(device)
+    X_val_tensor = torch.tensor(X_val_selected, dtype=torch.float32).to(device)
     y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
     y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).to(device)
+    y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).to(device)
     
     # Configure best model
-    num_hidden_layers = int(best_individual[-3])
-    hidden_layers = tuple(best_individual[num_features:num_features + num_hidden_layers])
-    activation = ['identity', 'logistic', 'tanh', 'relu'][best_individual[-2]]
-    alpha = best_individual[-1]
+    num_hidden_layers = int(best_individual[5])
+    hidden_layers = tuple(best_individual[:num_hidden_layers])
+    activation = ['identity', 'logistic', 'tanh', 'relu'][best_individual[6]]
+    alpha = best_individual[7]
+    
+    print(f"\nBest model configuration:")
+    print(f"Hidden layers: {hidden_layers}")
+    print(f"Activation: {activation}")
+    print(f"Alpha (L2 regularization): {alpha}")
     
     # Create and train final model
     best_model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(best_model.parameters(), lr=0.001, weight_decay=alpha)
     
-    # Create data loader for training
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
-    
     # Train best model with validation
+    print("\nTraining best model...")
     train_losses, train_accuracies, val_losses, val_accuracies = train_best_model(
         best_model, X_train_tensor, y_train_tensor, 
-        X_train_tensor, y_train_tensor,
+        X_val_tensor, y_val_tensor,
         criterion, optimizer
     )
 
@@ -384,20 +357,15 @@ def main():
         precision = precision_score(y_test_cpu, test_preds_cpu)
         recall = recall_score(y_test_cpu, test_preds_cpu)
         f1 = f1_score(y_test_cpu, test_preds_cpu)
-        #auc = roc_auc_score(y_test_cpu, test_probs_cpu)
-        #brier = brier_score_loss(y_test_cpu, test_probs_cpu)
     
     print("\nModel Performance Metrics:")
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
     print(f"Recall: {recall:.4f}")
     print(f"F1-Score: {f1:.4f}")
-    #print(f"AUC: {auc:.4f}")
-    #print(f"Brier Score: {brier:.4f}")
     
     # Print selected features
-    selected_features = X_train.columns[feature_mask].tolist()
-    print("\nSelected Features:", selected_features)
+    print(f"\nSelected Features ({len(selected_features)}): {selected_features}")
 
 if __name__ == "__main__":
     main()
