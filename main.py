@@ -3,121 +3,163 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.utils import shuffle
 import seaborn as sns
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.feature_selection import SelectKBest, f_classif, RFE
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from deap import base, creator, tools, algorithms
 import random
 import torch
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import warnings
+warnings.filterwarnings('ignore')
 
 file_path = 'dataset/cardio_train.csv'
 
 df = pd.read_csv(file_path, sep=';')
 
-columns = df.columns.drop('cardio')
+print("Dataset shape:", df.shape)
+print("Target distribution:")
+print(df['cardio'].value_counts(normalize=True))
 
+# Remove outliers using IQR method
+def remove_outliers(df, columns):
+    for col in columns:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
+    return df
+
+# Remove extreme outliers for blood pressure and weight
+outlier_columns = ['ap_hi', 'ap_lo', 'weight', 'height']
+print(f"Before outlier removal: {len(df)} samples")
+df = remove_outliers(df, outlier_columns)
+print(f"After outlier removal: {len(df)} samples")
+
+# Convert age from days to years
 df['age'] = df['age'] / 365
 df['age'] = df['age'].astype(int)
 
-# group by blood pressure
-# 1- Normal (sys <= 120 and dia <= 80)
-# 2- at risk (120 < sys <= 140 or 80 < dia <= 90)
-# 3- high (sys > 140 or dia > 90)
-
+# Enhanced feature engineering
+# Blood pressure categories
 df['blood_pressure'] = 0
-
 df.loc[(df['ap_hi'] <= 120) & (df['ap_lo'] <= 80), 'blood_pressure'] = 1
-
 df.loc[((df['ap_hi'] > 120) & (df['ap_hi'] <= 140)) | ((df['ap_lo'] > 80) & (df['ap_lo'] <= 90)), 'blood_pressure'] = 2
-
 df.loc[(df['ap_hi'] > 140) | (df['ap_lo'] > 90), 'blood_pressure'] = 3
 
+# BMI and BMI categories
 df['bmi'] = df['weight'] / (df['height'] / 100) ** 2
+df['bmi_category'] = 0
+df.loc[df['bmi'] < 18.5, 'bmi_category'] = 1  # Underweight
+df.loc[(df['bmi'] >= 18.5) & (df['bmi'] < 25), 'bmi_category'] = 2  # Normal
+df.loc[(df['bmi'] >= 25) & (df['bmi'] < 30), 'bmi_category'] = 3  # Overweight
+df.loc[df['bmi'] >= 30, 'bmi_category'] = 4  # Obese
+
+# Pulse pressure (important cardiovascular indicator)
+df['pulse_pressure'] = df['ap_hi'] - df['ap_lo']
+
+# Age groups
+df['age_group'] = 0
+df.loc[df['age'] < 45, 'age_group'] = 1
+df.loc[(df['age'] >= 45) & (df['age'] < 55), 'age_group'] = 2
+df.loc[(df['age'] >= 55) & (df['age'] < 65), 'age_group'] = 3
+df.loc[df['age'] >= 65, 'age_group'] = 4
+
+# Risk factors combination
+df['risk_factors'] = df['smoke'] + df['alco'] + (df['cholesterol'] > 1).astype(int) + (df['gluc'] > 1).astype(int)
+
+# Interaction features
+df['age_bmi'] = df['age'] * df['bmi']
+df['bp_age'] = df['blood_pressure'] * df['age']
 
 df.fillna(df.median(), inplace=True)
-df = df.drop(columns=['id'],axis=1)
+df = df.drop(columns=['id'], axis=1)
 
-# Extract features (all columns except 'cardio') and target variable ('cardio')
-X = df.drop(columns=['cardio'],axis=1)
+# Extract features and target
+X = df.drop(columns=['cardio'], axis=1)
 y = df['cardio']
 
-columns_to_standardize = ['age', 'height','weight','ap_hi','ap_lo','bmi']
+print(f"Final feature set: {list(X.columns)}")
+print(f"Number of features: {X.shape[1]}")
 
-# Split dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=42)
+# Use more robust scaling
+columns_to_standardize = ['age', 'height', 'weight', 'ap_hi', 'ap_lo', 'bmi', 'pulse_pressure', 'age_bmi', 'bp_age']
 
-# Standardize the feature values
-scaler = StandardScaler()
+# Split dataset with stratification
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=42, stratify=y_train)
+
+# Use RobustScaler for better outlier handling
+scaler = RobustScaler()
 X_train[columns_to_standardize] = scaler.fit_transform(X_train[columns_to_standardize])
 X_test[columns_to_standardize] = scaler.transform(X_test[columns_to_standardize])
 X_val[columns_to_standardize] = scaler.transform(X_val[columns_to_standardize])
 
-# Feature Selection using SelectKBest
+# Feature Selection using multiple methods
 print("Performing feature selection...")
-selector = SelectKBest(score_func=f_classif, k=8)  # Select top 8 features
-X_train_selected = selector.fit_transform(X_train, y_train)
-X_val_selected = selector.transform(X_val)
-X_test_selected = selector.transform(X_test)
 
-# Get selected feature names
-selected_features = X_train.columns[selector.get_support()].tolist()
-print(f"Selected features: {selected_features}")
+# Method 1: SelectKBest
+selector_kbest = SelectKBest(score_func=f_classif, k=12)  # Select more features
+X_train_kbest = selector_kbest.fit_transform(X_train, y_train)
+selected_features_kbest = X_train.columns[selector_kbest.get_support()].tolist()
+
+# Method 2: Random Forest feature importance
+rf_selector = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_selector.fit(X_train, y_train)
+feature_importance = pd.DataFrame({
+    'feature': X_train.columns,
+    'importance': rf_selector.feature_importances_
+}).sort_values('importance', ascending=False)
+
+# Select top features from RF
+top_rf_features = feature_importance.head(12)['feature'].tolist()
+
+# Combine features from both methods
+combined_features = list(set(selected_features_kbest + top_rf_features))
+print(f"Selected features: {combined_features}")
+
+# Use combined features
+X_train_selected = X_train[combined_features].values
+X_val_selected = X_val[combined_features].values
+X_test_selected = X_test[combined_features].values
 
 # Check CUDA availability
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-if not torch.cuda.is_available():
-    print("WARNING: CUDA is not available. Running on CPU instead.")
-
-# Create the Fitness and Individual classes for hyperparameter optimization only
-creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-creator.create("Individual", list, fitness=creator.FitnessMax)
-
-def custom_mutate(individual, indpb):
-    # Mutate the hidden layer sizes and number of layers
-    for i in range(5):  # Reduced from 10 to 5 possible hidden layers
-        if random.random() < indpb:
-            individual[i] = random.randint(10, 100)  # Reduced max size from 200 to 100
-    
-    if random.random() < indpb:
-        individual[5] = random.randint(1, 3)  # Reduced max layers from 10 to 3
-    
-    if random.random() < indpb:
-        individual[6] = random.randint(0, 3)
-
-    if random.random() < indpb:
-        individual[7] = random.uniform(0.0001, 0.01)
-
-    return individual,
-
-# Define the neural network model
-class MLPModel(nn.Module):
-    def __init__(self, input_size, hidden_layers, activation='relu'):
-        super(MLPModel, self).__init__()
+# Enhanced neural network architecture
+class ImprovedMLPModel(nn.Module):
+    def __init__(self, input_size, hidden_layers, activation='relu', dropout_rate=0.3):
+        super(ImprovedMLPModel, self).__init__()
         
-        # Create list of layers
         layers = []
         prev_size = input_size
         
-        # Add hidden layers
-        for size in hidden_layers:
+        for i, size in enumerate(hidden_layers):
             layers.append(nn.Linear(prev_size, size))
+            layers.append(nn.BatchNorm1d(size))  # Add batch normalization
+            
             if activation == 'relu':
                 layers.append(nn.ReLU())
             elif activation == 'tanh':
                 layers.append(nn.Tanh())
             elif activation == 'logistic':
                 layers.append(nn.Sigmoid())
+            elif activation == 'leaky_relu':
+                layers.append(nn.LeakyReLU(0.01))
+            
+            layers.append(nn.Dropout(dropout_rate))  # Add dropout
             prev_size = size
         
-        # Add output layer
+        # Output layer
         layers.append(nn.Linear(prev_size, 1))
         layers.append(nn.Sigmoid())
         
@@ -126,29 +168,59 @@ class MLPModel(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+# Create the Fitness and Individual classes
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMax)
+
+def custom_mutate(individual, indpb):
+    # Mutate the hidden layer sizes
+    for i in range(5):
+        if random.random() < indpb:
+            individual[i] = random.randint(20, 150)  # Increased range
+    
+    if random.random() < indpb:
+        individual[5] = random.randint(2, 4)  # 2-4 layers
+    
+    if random.random() < indpb:
+        individual[6] = random.randint(0, 4)  # Added leaky_relu
+    
+    if random.random() < indpb:
+        individual[7] = random.uniform(0.0001, 0.01)  # L2 regularization
+    
+    if random.random() < indpb:
+        individual[8] = random.uniform(0.1, 0.5)  # Dropout rate
+
+    return individual,
+
 def evaluate(individual):
-    hyperparameters = individual
-    
-    # Convert to PyTorch tensors and move to GPU
-    X_train_tensor = torch.tensor(X_train_selected, dtype=torch.float32).to(device)
-    y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
-    
     try:
         # Configure model
         num_hidden_layers = int(individual[5])
-        hidden_layers = tuple(hyperparameters[:num_hidden_layers])
-        activation = ['identity', 'logistic', 'tanh', 'relu'][individual[6]]
+        hidden_layers = tuple(individual[:num_hidden_layers])
+        activation = ['relu', 'logistic', 'tanh', 'leaky_relu'][individual[6] % 4]  # Fix index error
         alpha = individual[7]
+        dropout_rate = individual[8]
         
-        # Create and move model to GPU
-        model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
+        # Convert to PyTorch tensors
+        X_train_tensor = torch.tensor(X_train_selected, dtype=torch.float32).to(device)
+        y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
+        X_val_tensor = torch.tensor(X_val_selected, dtype=torch.float32).to(device)
+        y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).to(device)
+        
+        # Create model
+        model = ImprovedMLPModel(X_train_selected.shape[1], hidden_layers, activation, dropout_rate).to(device)
         criterion = nn.BCELoss()
         optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=alpha)
+        scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
         
-        # Training loop - reduced epochs from 100 to 20
-        model.train()
+        # Training with early stopping
+        best_val_acc = 0
+        patience_counter = 0
+        max_patience = 10
         
-        for epoch in range(20):
+        for epoch in range(50):  # Increased epochs
+            # Training
+            model.train()
             outputs = model(X_train_tensor)
             loss = criterion(outputs, y_train_tensor.unsqueeze(1))
             
@@ -156,13 +228,24 @@ def evaluate(individual):
             loss.backward()
             optimizer.step()
             
-        # Calculate final training accuracy
-        with torch.no_grad():
-            outputs = model(X_train_tensor)
-            predictions = (outputs > 0.5).float().squeeze()
-            accuracy = (predictions == y_train_tensor).float().mean().item()
+            # Validation
+            model.eval()
+            with torch.no_grad():
+                val_outputs = model(X_val_tensor)
+                val_preds = (val_outputs > 0.5).float().squeeze()
+                val_acc = (val_preds == y_val_tensor).float().mean().item()
             
-        return accuracy,
+            scheduler.step(val_acc)
+            
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= max_patience:
+                    break
+        
+        return best_val_acc,
         
     except Exception as e:
         print(f"Error in evaluation: {e}")
@@ -171,21 +254,22 @@ def evaluate(individual):
 # Define the genetic algorithm components
 toolbox = base.Toolbox()
 
-# Define individual components - only hyperparameters now
-toolbox.register("attr_hidden_layer_size", random.randint, 10, 100)
-toolbox.register("attr_num_hidden_layers", random.randint, 1, 3)
-toolbox.register("attr_activation", random.randint, 0, 3)
+# Enhanced hyperparameter ranges
+toolbox.register("attr_hidden_layer_size", random.randint, 20, 150)
+toolbox.register("attr_num_hidden_layers", random.randint, 2, 4)
+toolbox.register("attr_activation", random.randint, 0, 4)
 toolbox.register("attr_alpha", random.uniform, 0.0001, 0.01)
+toolbox.register("attr_dropout", random.uniform, 0.1, 0.5)
 
 # Create hyperparameter attributes
 hidden_layer_attrs = [toolbox.attr_hidden_layer_size for _ in range(5)]
-other_attrs = [toolbox.attr_num_hidden_layers, toolbox.attr_activation, toolbox.attr_alpha]
+other_attrs = [toolbox.attr_num_hidden_layers, toolbox.attr_activation, toolbox.attr_alpha, toolbox.attr_dropout]
 all_attrs = hidden_layer_attrs + other_attrs
 
 toolbox.register("individual", tools.initCycle, creator.Individual, all_attrs, n=1)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 toolbox.register("mate", tools.cxTwoPoint)
-toolbox.register("mutate", custom_mutate, indpb=0.2)
+toolbox.register("mutate", custom_mutate, indpb=0.3)
 toolbox.register("select", tools.selTournament, tournsize=3)
 toolbox.register("evaluate", evaluate)
 
@@ -203,11 +287,16 @@ def log_stats(gen, population, fits):
     print(f"  Std: {fit_std:.4f}")
     print("------------------------")
 
-def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, criterion, optimizer, num_epochs=50):  # Reduced from 1000 to 50
+def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, criterion, optimizer, num_epochs=100):
     train_losses = []
     train_accuracies = []
     val_losses = []
     val_accuracies = []
+    
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
+    best_val_acc = 0
+    patience_counter = 0
+    max_patience = 15
     
     for epoch in range(num_epochs):
         # Training
@@ -234,7 +323,18 @@ def train_best_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_
             val_losses.append(val_loss.item())
             val_accuracies.append(val_acc)
         
-        if epoch % 10 == 0:  # Reduced logging frequency
+        scheduler.step(val_acc)
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= max_patience:
+                print(f"Early stopping at epoch {epoch}")
+                break
+        
+        if epoch % 20 == 0:
             print(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
     
     return train_losses, train_accuracies, val_losses, val_accuracies
@@ -269,8 +369,8 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
     
-    # Initialize population - reduced from 10 to 5
-    population = toolbox.population(n=5)
+    # Initialize population - increased for better exploration
+    population = toolbox.population(n=8)
     
     # Statistics setup
     stats = tools.Statistics(lambda ind: ind.fitness.values)
@@ -283,10 +383,11 @@ def main():
     logbook = tools.Logbook()
     logbook.header = "gen", "min", "max", "avg", "std"
 
-    # Apply the genetic algorithm with logging - reduced to 3 generations
-    for gen in range(3):
+    # Apply the genetic algorithm - increased generations
+    print("Starting genetic algorithm optimization...")
+    for gen in range(5):
         # Select the next generation individuals
-        offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.2)
+        offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.3)
         
         # Evaluate the individuals with an invalid fitness
         invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
@@ -316,16 +417,18 @@ def main():
     # Configure best model
     num_hidden_layers = int(best_individual[5])
     hidden_layers = tuple(best_individual[:num_hidden_layers])
-    activation = ['identity', 'logistic', 'tanh', 'relu'][best_individual[6]]
+    activation = ['relu', 'logistic', 'tanh', 'leaky_relu'][best_individual[6] % 4]  # Fix index error
     alpha = best_individual[7]
+    dropout_rate = best_individual[8]
     
     print(f"\nBest model configuration:")
     print(f"Hidden layers: {hidden_layers}")
     print(f"Activation: {activation}")
     print(f"Alpha (L2 regularization): {alpha}")
+    print(f"Dropout rate: {dropout_rate}")
     
     # Create and train final model
-    best_model = MLPModel(X_train_selected.shape[1], hidden_layers, activation).to(device)
+    best_model = ImprovedMLPModel(X_train_selected.shape[1], hidden_layers, activation, dropout_rate).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(best_model.parameters(), lr=0.001, weight_decay=alpha)
     
@@ -358,14 +461,17 @@ def main():
         recall = recall_score(y_test_cpu, test_preds_cpu)
         f1 = f1_score(y_test_cpu, test_preds_cpu)
     
-    print("\nModel Performance Metrics:")
+    print("\nFinal Model Performance Metrics:")
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
     print(f"Recall: {recall:.4f}")
     print(f"F1-Score: {f1:.4f}")
     
-    # Print selected features
-    print(f"\nSelected Features ({len(selected_features)}): {selected_features}")
+    # Print feature information
+    print(f"\nSelected Features ({len(combined_features)}): {combined_features}")
+    print(f"Feature importance (top 10):")
+    for i, row in feature_importance.head(10).iterrows():
+        print(f"  {row['feature']}: {row['importance']:.4f}")
 
 if __name__ == "__main__":
     main()
